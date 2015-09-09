@@ -1,0 +1,15 @@
+#! /bin/bash
+
+set -e
+cd CHANGEME_PATH_TO_BLOG
+rsync -az --delete CHANGEME_HOST_AND_PATH_FOR_BLOG_COMMENTS/ CHANGEME_PATH_TO_BLOG/comments/all/
+./sort_comments
+if [ -e rebuild ]; then
+  ./aikakirja
+  chmod -R a+rX CHANGEME_PATH_TO_BLOG/out
+  while test 1; do
+    rsync -az --delete CHANGEME_PATH_TO_BLOG/out/ CHANGEME_HOST_AND_PATH_FOR_BLOG/ && break
+    sleep 1m
+  done
+  rm rebuild
+fi

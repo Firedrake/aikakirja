@@ -1,0 +1,145 @@
+#! /usr/bin/perl -w
+
+use strict;
+use POSIX qw(strftime);
+use DBI;
+use Date::Parse;
+use List::Util qw(max);
+use Getopt::Std;
+use YAML::XS;
+
+my $base="$ENV{HOME}/projects/blog";
+my $pending="$base/pending";
+my $entries="$base/entries";
+
+my %o;
+getopts('d',\%o);
+
+my $cfg=yaml_load_file(shift @ARGV || 'config.yaml');
+
+opendir D,$pending;
+my @files=sort grep !/^\./,readdir D;
+closedir D;
+my $date=strftime("%m%d",localtime);
+my @list=grep /^${date}_/,@files;
+unless (@list) {
+  my $dbh=DBI->connect('dbi:SQLite:dbname='.$cfg->{db},'','',
+                       {
+                         sqlite_unicode => 1,AutoCommit => 0});
+  my %latest;
+  {
+    my $sth=$dbh->prepare('SELECT date,text_file FROM posts ORDER BY date');
+    $sth->execute;
+    while (my @a=$sth->fetchrow_array) {
+      (my $cat=$a[1]) =~ s/_.*//;
+      $latest{$cat}=$a[0];
+    }
+    $sth->finish;
+  }
+  foreach my $k (keys %latest) {
+    my $since=time-$latest{$k};
+    if ($since < 3600*26) {
+      $latest{$k}=0;
+    } else {
+      $latest{$k}=20+sqrt($since/86400);
+    }
+  }
+  map {/(?:\d+_)?([^_]*)_.*/;$latest{$1}+=0.9} grep /^[a-z]/,@files;
+  my @f=@files;
+  map {s/^\d+_//;s/_.*//;delete $latest{$_}} grep /^\d/,@f;
+  unless ($o{d}) {
+    my @a;
+    foreach my $active (sort {$latest{$b} <=> $latest{$a}} keys %latest) {
+      if (grep /^${active}_/,@files) {
+        push @a,[sprintf('%.1f',$latest{$active}),$active];
+      }
+    }
+    print tabular(\@a);
+  }
+  foreach my $active (sort {$latest{$b} <=> $latest{$a}} keys %latest) {
+    @list=grep /^${active}_/,@files;
+    if (@list) {
+      splice @list,1;
+      last;
+    }
+  }
+$dbh->disconnect;
+}
+map {s/^/$pending\//} @list;
+
+
+print map {"$_\n"} @list;
+unless ($o{d}) {
+  exit;
+}
+
+foreach my $in (@list) {
+  my %tags;
+  (my $out=$in) =~ s/.*\/(:?\d*_*)?//;
+  $out="$entries/$out";
+
+  open I,'<',$in;
+  open O,'>',$out;
+
+  my %headers=('Mime-Version' => '1.0',
+               'Content-Type' => 'text/plain; charset=UTF-8');
+  print O strftime('Date: %d %B %Y %H:%M',localtime),"\n";
+  {
+    my $state=0;
+    while (<I>) {
+      if ($state>0) {
+        if ($state==1) {
+          if (/<cut>/) {
+            $state=2;
+          }
+        }
+      }
+      if ($state==0) {
+        if (/^Title: (.+)/) {
+          $headers{Subject}="Review: $1";
+        } elsif (/^Tags: (.+)/) {
+          %tags=map {lc($_) => 1} split /,\s*/,$1
+        } elsif ($_ !~ /[A-Za-z0-9]/) {
+          $state=1;
+        }
+      }
+      print O $_;
+    }
+  }
+  close I;
+  close O;
+  unlink $in;
+}
+if (@list) {
+  open OUT,'>','rebuild';
+  close OUT;
+}
+system(qw(./chron));
+
+sub tabular {
+  my $d=shift;
+  my @columnlength;
+  foreach my $row (@{$d}) {
+    foreach my $colno (0..$#{$row}) {
+      if (!defined($columnlength[$colno]) ||
+          $columnlength[$colno] < length($row->[$colno])) {
+        $columnlength[$colno]=length($row->[$colno]);
+      }
+    }
+  }
+  my $format=join('  ',map {"%${_}s"} @columnlength);
+  my $result='';
+  foreach my $row (@{$d}) {
+    $result .= sprintf($format,@{$row})."\n";
+  }
+  return $result;
+}
+
+sub yaml_load_file {
+  my $file=shift;
+  open (I,'<',$file) || die "Can't load $file\n";
+  my $data=join('',<I>);
+  close I;
+  my $r=Load($data) || die "Can't decode $file\n";
+  return $r;
+}

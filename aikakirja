@@ -1,0 +1,618 @@
+#! /usr/bin/perl
+
+use strict;
+use warnings;
+
+use DBI;
+use Date::Parse;
+use File::Temp qw(tempfile);
+use File::Path qw(make_path);
+use HTML::Template;
+use List::Util qw(min);
+use POSIX qw(strftime);
+use URI::Escape;
+use YAML::XS;
+
+my $buildtime=time;
+
+my $cfg=yaml_load_file($ARGV[0] || 'config.yaml');
+$ENV{HTML_TEMPLATE_ROOT}=$cfg->{template};
+my $dbh=DBI->connect('dbi:SQLite:dbname='.$cfg->{db},'','',
+                     {
+                       sqlite_unicode => 1,AutoCommit => 0});
+#,{PrintError => 0});
+
+my $trans=0;
+{                               # create tables if needed
+  $dbh->do('SELECT id FROM posts WHERE id=1');
+  if (defined $DBI::err && $DBI::err==1) {
+    $dbh->do('CREATE TABLE posts
+                (id INTEGER PRIMARY KEY ASC,
+                 date STRING,
+                 title STRING,
+                 format STRING,
+                 html_short STRING,
+                 comments INTEGER,
+                 text_file STRING,
+                 html_file STRING,
+                 last_built INTEGER)');
+    # some sort of autopage dependency thing
+    $dbh->do('CREATE TABLE comments
+                (id INTEGER PRIMARY KEY ASC,
+                 post_id INTEGER,
+                 name STRING,
+                 file STRING,
+                 date INTEGER,
+                 last_built INTEGER,
+                 body STRING)');
+    $dbh->do('CREATE TABLE tags
+                (id INTEGER PRIMARY KEY ASC,
+                 name STRING UNIQUE)');
+    $dbh->do('CREATE TABLE post_tags
+                (post_id INTEGER,
+                 tag_id INTEGER)');
+    $dbh->do('CREATE TABLE post_xrefs
+                (from_id INTEGER,
+                 to_id INTEGER)');
+    $dbh->do('CREATE TABLE pending_xrefs
+                (from_id INTEGER,
+                 to_file STRING)');
+    $dbh->do('CREATE TABLE headerfields
+                (id INTEGER PRIMARY KEY ASC,
+                 field_name STRING UNIQUE)');
+    $dbh->do('CREATE TABLE headervalues
+                (post_id INTEGER,
+                 field_id INTEGER,
+                 field_text STRING)');
+    $trans=1;
+  }
+}
+
+{
+  my %buildqueue; # srcfilename => {id => db_id, modtime => file mod time}
+  my %srcfiles;                 # filename => modtime
+  opendir ID,$cfg->{source};
+  %srcfiles=map {$_ => (stat($cfg->{source}.'/'.$_))[9]}
+    grep !/^\./,readdir ID;
+  closedir ID;
+
+  my $sth=$dbh->prepare('SELECT id,text_file,last_built,html_file,comments,date
+                         FROM posts');
+  $sth->execute;
+  while (my @a=$sth->fetchrow_array) {
+    if (exists $srcfiles{$a[1]}) {
+      if (($a[2] < $srcfiles{$a[1]}) ||
+          ($a[4]==1 && $buildtime-$a[5]>86400*$cfg->{comment_days})) {
+        $buildqueue{$a[1]}={id => $a[0],modtime => $srcfiles{$a[1]}};
+      }
+      delete $srcfiles{$a[1]};
+    } else {     # post is in DB but not source tree, has been deleted
+      unlink $cfg->{target}.'/'.$a[3];
+      $dbh->do('DELETE FROM posts WHERE id=?',{},$a[0]);
+      $dbh->do('DELETE FROM comments WHERE post_id=?',{},$a[0]);
+      $dbh->do('DELETE FROM headervalues WHERE post_id=?',{},$a[0]);
+      $trans=1;
+    }
+  }
+  $sth->finish;
+  map {$buildqueue{$_}={id => 0,modtime => $srcfiles{$_}}} keys %srcfiles;
+  if (%buildqueue) {
+    $trans=1;
+    foreach my $ftb (keys %buildqueue) {
+      open I,'<:encoding(UTF-8)',$cfg->{source}.'/'.$ftb;
+      my $content=join('',<I>);
+      close I;
+      my %head=map {$_ => []} qw(tags xrefs); # multivalue headers
+      $content =~ /(.*?)\n\n(.*)/s;
+      (my $hdr,$content)=($1,$2);
+      foreach (split /\n/,$hdr) {
+        if (/^(.+?):\s+(.*)$/) {
+          my ($k,$v)=(lc($1),$2);
+          if (exists $head{$k} && ref $head{$k}) {
+            push @{$head{$k}},$v;
+          } else {
+            $head{lc($1)}=$2;
+          }
+        }
+      }
+      my %dbe=(text_file => $ftb,last_built => $buildtime,format => $head{format} || $cfg->{format} || 'markdown');
+      $dbe{html_short}=mk_html($content,'short',$dbe{format});
+      $dbe{date}=$buildqueue{$ftb}{modtime};
+      if (exists $head{date}) {
+        $dbe{date}=str2time($head{date});
+      }
+      $dbe{comments}=($buildtime-$dbe{date})>86400*$cfg->{comment_days}?0:1;
+      $dbe{title}=$head{title} or die "no title for $ftb\n";
+      {
+        (my $html=$dbe{title}) =~ s/[^0-9A-Za-z]/_/g;
+        my $tpl=strftime($cfg->{postfile},localtime($dbe{date}));
+        $tpl =~ s/POST/$html.html/;
+        $dbe{html_file}=$tpl;
+      }
+      my @k=keys %dbe;
+      my @v=values %dbe;
+      if ($buildqueue{$ftb}{id}==0) { # new post
+        $dbh->do('INSERT INTO posts ('.join(', ',@k).') VALUES ('.join(',',('?') x scalar @v).')',{},@v);
+        $buildqueue{$ftb}{id}=$dbh->last_insert_id('','','','');
+      } else {                  # old post updated
+        $dbh->do('UPDATE posts SET '.join(', ',map {"$_=?"} @k).' WHERE id=?',{},@v,$buildqueue{$ftb}{id});
+      }
+      # Tags
+      $dbh->do('DELETE FROM post_tags WHERE post_id=?',{},$buildqueue{$ftb}{id});
+      if (exists $head{tags}) {
+        my %tags=map {lc($_) => 0} map {split /,\s*/,$_} @{$head{tags}};
+        $sth=$dbh->prepare('SELECT id FROM tags WHERE name=?');
+        foreach my $t (keys %tags) {
+          $sth->bind_param(1,$t);
+          $sth->execute;
+          my @tid=$sth->fetchrow_array;
+          if (@tid && $tid[0]>0) {
+            $tags{$t}=$tid[0];
+          } else {
+            $dbh->do('INSERT INTO tags (name) VALUES (?)',{},$t);
+            $tags{$t}=$dbh->last_insert_id('','','','');
+          }
+          $dbh->do('INSERT INTO post_tags (post_id,tag_id) VALUES (?,?)',{},$buildqueue{$ftb}{id},$tags{$t});
+        }
+        $sth->finish;
+      }
+      # bonus headers
+      $sth=$dbh->prepare('SELECT id FROM headerfields WHERE field_name=?');
+      $dbh->do('DELETE FROM headervalues WHERE post_id=?',{},$buildqueue{$ftb}{id});
+      foreach my $hk (keys %head) {
+        my $hid;
+        unless ($hk =~ /^(title|date|tags|xrefs)$/) { # we deal with those elsewhere
+
+          $sth->bind_param(1,$hk);
+          $sth->execute;
+          my @hid=$sth->fetchrow_array;
+          if (@hid && $hid[0]>0) {
+            $hid=$hid[0];
+          } else {
+            $dbh->do('INSERT INTO headerfields (field_name) VALUES (?)',{},$hk);
+            $hid=$dbh->last_insert_id('','','','');
+          }
+          $dbh->do('INSERT INTO headervalues (post_id,field_id,field_text) VALUES (?,?,?)',{},$buildqueue{$ftb}{id},$hid,$head{$hk});
+        }
+      }
+      $sth->finish;
+      # Xrefs
+      # Just make a note, because they might refer to a post that hasn't yet
+      # been imported in this batch.
+      $dbh->do('DELETE FROM post_xrefs WHERE from_id=?',{},$buildqueue{$ftb}{id});
+      if (exists $head{xrefs}) {
+        my %xref=map {lc($_) => 0} map {split /,\s*/,$_} @{$head{xrefs}};
+        foreach my $t (keys %xref) {
+          if ($t ne $ftb) {
+            $dbh->do('INSERT INTO pending_xrefs (from_id,to_file) VALUES (?,?)',
+                     {
+                         },
+                     $buildqueue{$ftb}{id},
+                     $t);
+          }
+        }
+      }
+    }
+  }
+}
+
+# check for tags that are now not used by any page
+$dbh->do('DELETE from tags WHERE id NOT IN (SELECT tag_id FROM post_tags)');
+
+# slurp in all comments
+{
+  my %cqueue;
+  my %cfiles;                   # filename => modtime
+  opendir ID,$cfg->{comments};
+  %cfiles=map {$_ => (stat($cfg->{comments}.'/'.$_))[9]}
+    grep !/^\./,readdir ID;
+  closedir ID;
+  my $sth=$dbh->prepare('SELECT id,file,last_built
+                         FROM comments');
+  $sth->execute;
+  while (my @a=$sth->fetchrow_array) {
+    if (exists $cfiles{$a[1]}) {
+      if ($a[2] < $cfiles{$a[1]}) {
+        $cqueue{$a[1]}={id => $a[0],modtime => $cfiles{$a[1]}};
+      }
+      delete $cfiles{$a[1]};
+    } else {     # comment is in DB but not source tree, has been deleted
+      $dbh->do('DELETE FROM comments WHERE id=?',{},$a[0]);
+      $trans=1;
+    }
+  }
+  $sth->finish;
+  map {$cqueue{$_}={id => 0,modtime => $cfiles{$_}}} keys %cfiles;
+  if (%cqueue) {
+    $sth=$dbh->prepare('SELECT id FROM posts WHERE html_file GLOB ?');
+    foreach my $ftb (keys %cqueue) {
+      open I,'<:encoding(UTF-8)',$cfg->{comments}.'/'.$ftb;
+      my $content=join('',<I>);
+      close I;
+      my %head;
+      $content =~ /(.*?)\n\n(.*)/s;
+      (my $hdr,$content)=($1,$2);
+      foreach (split /\n/,$hdr) {
+        if (/^(.+?):\s+(.*)$/) {
+          my ($k,$v)=(lc($1),$2);
+          if (exists $head{$k} && ref $head{$k}) {
+            push @{$head{$k}},$v;
+          } else {
+            $head{lc($1)}=$2;
+          }
+        }
+      }
+      my %dbe=(file => $ftb,last_built => $buildtime,body => $content);
+      $dbe{name}=$head{name};
+      $dbe{date}=$cqueue{$ftb}{modtime};
+      if (exists $head{date}) {
+        $dbe{date}=str2time($head{date});
+      } elsif ($ftb =~ /html\.(\d+-[A-Z][a-z]+-\d+-\d+:\d+:\d+)$/) {
+        (my $dd=$1) =~ s/-/ /g;
+        $dd=str2time($dd);
+        if ($dd) {
+          $dbe{date}=$dd;
+        }
+      }
+      if (exists $head{page}) {
+        $sth->execute($head{page});
+        if (my @a=$sth->fetchrow_array) {
+          if ($a[0]) {
+            $dbe{post_id}=$a[0];
+          }
+        }
+      } elsif ($ftb =~ /^(.*?)_html\./) {
+        $sth->execute('*'.$1.'.html');
+        if (my @a=$sth->fetchrow_array) {
+          if ($a[0]) {
+            $dbe{post_id}=$a[0];
+          }
+        }
+      }
+      if (exists $dbe{post_id}) {
+        $trans=1;
+        my @k=keys %dbe;
+        my @v=values %dbe;
+        if ($cqueue{$ftb}{id}==0) { # new post
+          $dbh->do('INSERT INTO comments ('.join(', ',@k).') VALUES ('.join(',',('?') x scalar @v).')',{},@v);
+        } else {                # old post updated
+          $dbh->do('UPDATE comments SET '.join(', ',map {"$_=?"} @k).' WHERE id=?',{},@v,$cqueue{$ftb}{id});
+        }
+        $dbh->do('UPDATE posts SET last_built=? WHERE id=?',{},$buildtime,$dbe{post_id});
+      }
+    }
+    $sth->finish;
+  }
+}
+
+my @calendar;
+{
+  my %cal;
+  my $sth=$dbh->prepare('SELECT date FROM posts');
+  $sth->execute;
+  while (my @a=$sth->fetchrow_array) {
+    my @l=localtime($a[0]);
+    my ($y,$m,$mname)=map {strftime('%'.$_,@l)} qw(Y m B);
+    $cal{$y}{$m}{name}=$mname;
+    $cal{$y}{$m}{count}++;
+    my $ip=strftime($cfg->{postfile},@l);
+    $ip =~ s/POST//;
+    $cal{$y}{$m}{link}=$ip;
+    $cal{$y}{$m}{top_int}=$cfg->{top_int};
+  }
+  $sth->finish;
+  foreach my $y (sort keys %cal) {
+    my %r=(name => $y);
+    foreach my $m (sort keys %{$cal{$y}}) {
+      push @{$r{month}},$cal{$y}{$m};
+    }
+    push @calendar,\%r;
+  }
+}
+
+my @alltags;
+{ # popularity-rated (1-7) list of all tags
+  my $sth=$dbh->prepare('SELECT DISTINCT COUNT(tag_id) FROM post_tags GROUP BY tag_id ORDER BY COUNT(tag_id)');
+  $sth->execute;
+  my @counts=map {$_->[0]} @{$sth->fetchall_arrayref};
+  $sth->finish;
+  my $l=(scalar @counts)/7;
+  my @thresholds;
+  foreach (1..6) {
+    push @thresholds,$counts[int($l*$_-1)];
+  }
+  $sth=$dbh->prepare('SELECT name,COUNT(tag_id) FROM post_tags JOIN tags ON post_tags.tag_id=tags.id GROUP BY tag_id ORDER BY name');
+  $sth->execute;
+  while (my @a=$sth->fetchrow_array) {
+    push @alltags,{tag => $a[0],
+                   tag_encode => uri_escape($a[0]),
+                   fontsize => 7,
+                   top_int => $cfg->{top_int}};
+    foreach my $p (0..5) {
+      if ($a[1]<=$thresholds[$p]) {
+        $alltags[-1]{fontsize}=$p+1;
+        last;
+      }
+    }
+  }
+}
+
+# Try to link any dangling xrefs with new posts
+{
+  my $sth=$dbh->prepare('SELECT from_id,posts.id,to_file
+                         FROM pending_xrefs
+                          INNER JOIN posts
+                           ON to_file=text_file
+                         WHERE posts.id IS NOT NULL');
+  $sth->execute;
+  while (my @a=$sth->fetchrow_array) {
+    $dbh->do('INSERT INTO post_xrefs (from_id,to_id) VALUES (?,?)',{},$a[0],$a[1]);
+    $dbh->do('DELETE FROM pending_xrefs WHERE from_id=? AND to_file=?',{},$a[0],$a[2]);
+    $dbh->do('UPDATE posts SET last_built=? WHERE id=?',{},$buildtime,$a[0]);
+  }
+  $sth->finish;
+}
+
+{ # compile and build article-list pages (and RSS)
+  my $sth=$dbh->prepare('SELECT id,html_file,html_short,title,date,last_built FROM posts ORDER BY date DESC');
+  $sth->execute;
+  my $tag=$dbh->prepare('SELECT tags.name FROM tags INNER JOIN post_tags ON tags.id=post_tags.tag_id WHERE post_tags.post_id=?');
+  my $comm=$dbh->prepare('SELECT COUNT(id) FROM comments WHERE post_id=?');
+  my %pages=('index.html' => {title => 'Latest posts'});
+  while (my $a=$sth->fetchrow_hashref) {
+    my %t=dateformat($a->{date},'date');
+    map {$a->{$_}=$t{$_}} keys %t;
+    map {$a->{$_}=$cfg->{$_}} qw(top_int top_ext);
+    $comm->execute($a->{id});
+    if (my $aa=$comm->fetchrow_arrayref) {
+      $a->{comments}=$aa->[0];
+      $a->{cplural}=($aa->[0]!=1);
+    }
+    push @{$pages{'index.html'}{posts}},$a;
+    my $ym=strftime($cfg->{postfile},localtime($a->{date}));
+    $ym =~ s/POST/index.html/;
+    push @{$pages{$ym}{posts}},$a;
+    $pages{$ym}{title}=strftime('%B %Y',localtime($a->{date}));
+    $tag->execute($a->{id});
+    while (my @t=$tag->fetchrow_array) {
+      my $t=$cfg->{tagdir}.$t[0].'/index.html';
+      push @{$pages{$t}{posts}},$a;
+      $pages{$t}{title}=$t[0];
+    }
+  }
+  $sth->finish;
+  $tag->finish;
+  $comm->finish;
+  if (scalar @{$pages{'index.html'}{posts}} > $cfg->{frontpage_posts}) {
+    splice @{$pages{'index.html'}{posts}},$cfg->{frontpage_posts};
+  }
+  foreach my $pagefile (keys %pages) {
+    my $clean=1;
+    foreach (@{$pages{$pagefile}{posts}}) {
+      if ($_->{last_built}>=$buildtime) {
+        $clean=0;
+        last;
+      }
+    }
+    unless ($clean) {
+      my $tmpl=HTML::Template->new(filename => 'postlist.tmpl',
+                                   die_on_bad_params => 0);
+      (my $pf=$pagefile) =~ s/html$/rss/;
+      my @links=({rel => 'alternate',
+                  type => 'application/rss+xml',
+                  title => 'RSS Feed',
+                  href => $pf,
+                  top_ext => $cfg->{top_ext}});
+      if ($pagefile eq 'index.html') {
+        push @links,{rel => 'alternate',
+                     type => 'application/rss+xml',
+                     title => 'Comments Feed',
+                     href => 'comments.rss',
+                     top_ext => $cfg->{top_ext}};
+      }
+      $tmpl->param(blogtitle => $cfg->{title},
+                   pagetitle => $pages{$pagefile}{title},
+                   top_int => $cfg->{top_int},
+                   posts => $pages{$pagefile}{posts},
+                   links => \@links);
+      if (@alltags) {
+        $tmpl->param(alltags => \@alltags);
+      }
+      if (@calendar) {
+        $tmpl->param(calendar => \@calendar);
+      }
+      (my $dir=join('/',$cfg->{target},$pagefile)) =~ s/\/[^\/]*$//;
+      make_path($dir);
+      open OUT,'>:encoding(UTF-8)',join('/',$cfg->{target},$pagefile);
+      print OUT $tmpl->output;
+      close OUT;
+      if (scalar @{$pages{$pagefile}{posts}} > $cfg->{rss_posts}) {
+        splice @{$pages{$pagefile}{posts}},$cfg->{rss_posts};
+      }
+      $tmpl=HTML::Template->new(filename => 'rss.tmpl',
+                                die_on_bad_params => 0);
+      $tmpl->param(blogtitle => $cfg->{title},
+                   pagetitle => $pages{$pagefile}{title},
+                   top_ext => $cfg->{top_ext},
+                   posts => $pages{$pagefile}{posts});
+      open OUT,'>:encoding(UTF-8)',join('/',$cfg->{target},$pf);
+      print OUT $tmpl->output;
+      close OUT;
+    }
+  }
+}
+
+{ # build full HTML posts (and RSS)
+  my $sth=$dbh->prepare('SELECT id,text_file,html_file,format,title,date,comments FROM posts WHERE last_built=?');
+  my $tag=$dbh->prepare('SELECT tags.name FROM tags,post_tags WHERE tags.id=post_tags.tag_id and post_tags.post_id=? ORDER BY tags.name');
+  my $xrefout=$dbh->prepare('SELECT html_file,title FROM post_xrefs INNER JOIN posts ON to_id=posts.id WHERE from_id=? ORDER BY posts.date');
+  my $comment=$dbh->prepare('SELECT name,date,body FROM comments WHERE post_id=? ORDER BY date');
+  $sth->execute($buildtime);
+  while (my @a=$sth->fetchrow_array) {
+    $tag->execute($a[0]);
+    my @tags=map {{tag => $_->[0],tag_encode => uri_escape($_->[0])}} @{$tag->fetchall_arrayref};
+    $xrefout->execute($a[0]);
+    my @xrefs=map {{link => $_->[0],title => $_->[1]}} @{$xrefout->fetchall_arrayref};
+    $comment->execute($a[0]);
+    my @comments=map {{name => $_->[0],dateformat($_->[1],'date'),body => $_->[2]}} @{$comment->fetchall_arrayref};
+    (my $dir=join('/',$cfg->{target},$a[2])) =~ s/\/[^\/]*$//;
+    make_path($dir);
+    my $tmpl=HTML::Template->new(filename => 'entry.tmpl',
+                                 die_on_bad_params => 0);
+    $tmpl->param(pagetitle => $a[4],
+                 blogtitle => $cfg->{title},
+                 dateformat($a[5],'date'),
+                 top_int => $cfg->{top_int},
+                 link => $a[2],
+                 submit_comment => $a[6],
+                 bodytext => mk_html($a[1],'long',$a[3]),);
+    if (@alltags) {
+      $tmpl->param(alltags => \@alltags);
+    }
+    if (@calendar) {
+      $tmpl->param(calendar => \@calendar);
+    }
+    if (@tags) {
+      $tmpl->param(tags => \@tags);
+    }
+    if (@xrefs) {
+      $tmpl->param(xrefs => \@xrefs);
+    }
+    if (@comments) {
+      $tmpl->param(comments => \@comments);
+    }
+    open OUT,'>:encoding(UTF-8)',join('/',$cfg->{target},$a[2]);
+    print OUT $tmpl->output;
+    close OUT;
+    {                           # build RSS comment feed
+      my $comm=$dbh->prepare('SELECT name,body,date FROM comments WHERE post_id=? ORDER BY comments.date DESC LIMIT ?');
+      $comm->execute($a[0],$cfg->{rss_comments});
+      my @posts;
+      while (my $a=$comm->fetchrow_hashref) {
+        my %t=dateformat($a->{date},'date');
+        map {$a->{$_}=$t{$_}} keys %t;
+        map {$a->{$_}=$cfg->{$_}} qw(top_int top_ext);
+        $a->{html_short}=$a->{body};
+        $a->{html_file}=$a[2].'#'.$a->{date};
+        $a->{title}=$a[4].': '.$a->{name};
+        push @posts,$a;
+      }
+      $comm->finish;
+      my $rtmpl=HTML::Template->new(filename => 'rss.tmpl',
+                                    die_on_bad_params => 0);
+      $rtmpl->param(blogtitle => $cfg->{title},
+                    pagetitle => $a[4].' comments feed',
+                    top_ext => $cfg->{top_ext},
+                    posts => \@posts);
+      (my $pf=$a[2]) =~ s/html$/rss/;
+      open OUT,'>:encoding(UTF-8)',join('/',$cfg->{target},$pf);
+      print OUT $rtmpl->output;
+      close OUT;
+    }
+  }
+  $sth->finish;
+  $tag->finish;
+  $xrefout->finish;
+}
+
+{ # build all-comments RSS feed
+  my $sth=$dbh->prepare('SELECT name,body,comments.date AS date,title,html_file FROM comments INNER JOIN posts ON post_id=posts.id ORDER BY comments.date DESC LIMIT ?');
+  $sth->execute($cfg->{rss_comments});
+  my @posts;
+  while (my $a=$sth->fetchrow_hashref) {
+    my %t=dateformat($a->{date},'date');
+    map {$a->{$_}=$t{$_}} keys %t;
+    map {$a->{$_}=$cfg->{$_}} qw(top_int top_ext);
+    $a->{html_short}=$a->{body};
+    $a->{html_file}.='#'.$a->{date};
+    $a->{title}.=': '.$a->{name};
+    push @posts,$a;
+  }
+  $sth->finish;
+  my $tmpl=HTML::Template->new(filename => 'rss.tmpl',
+                               die_on_bad_params => 0);
+  $tmpl->param(blogtitle => $cfg->{title},
+               pagetitle => 'Comments Feed',
+               top_ext => $cfg->{top_ext},
+               posts => \@posts);
+  open OUT,'>:encoding(UTF-8)',join('/',$cfg->{target},'comments.rss');
+  print OUT $tmpl->output;
+  close OUT;
+}
+
+if ($trans) {
+  $dbh->commit;
+}
+
+$dbh->disconnect;
+
+sub mk_html { # content is a filename or actual content;
+              # mode is "short" or "long";
+              # format is "markdown", "org-mode", "html", etc.
+  my ($content,$mode,$format)=@_;
+  if ($content !~ /\n/s) {
+    open I,'<:encoding(UTF-8)',$cfg->{source}.'/'.$content;
+    my $c=join('',<I>);
+    close I;
+    $c =~ /.*?\n\n(.*)/s;
+    $content=$1;
+  }
+  if ($mode eq 'short') {
+    $content =~ s/<cut>.*<\/cut>//si;
+  } else {
+    $content =~ s/<\/?cut>//sig;
+  }
+  my ($fh,$fn)=tempfile();
+  binmode($fh,':encoding(UTF-8)');
+  print $fh $content;
+  close $fh;
+  my $out='';
+  if ($format eq 'markdown') {
+    open H,'-|','markdown',$fn;
+    binmode(H,':encoding(UTF-8)');
+    $out=join('',<H>);
+    close H;
+  } elsif ($format eq 'org-mode') {
+    system('ln',$fn,"$fn,org");
+    system(qw(emacs --batch),'--load='.$cfg->{org},"--visit=$fn",qw(--funcall org-export-as-html-batch));
+    open H,'<',"$fn.html";
+    binmode(H,':encoding(UTF-8)');
+    $out=join('',<H>);
+    $out =~ s/.*<body[^>]*>//is;
+    $out =~ s/<\/body.*//is;
+    close H;
+    unlink "$fn.org","$fn.html";
+  } elsif ($format eq 'html') {
+    $out=$content;
+    $out =~ s/.*<body[^>]*>//is;
+    $out =~ s/<\/body.*//is;
+  }
+  unlink $fn;
+  return $out;
+}
+
+sub yaml_load_file {
+  my $file=shift;
+  open (I,'<',$file) || die "Can't load $file\n";
+  my $data=join('',<I>);
+  close I;
+  my $r=Load($data) || die "Can't decode $file\n";
+  return $r;
+}
+
+sub dateformat {
+  my $date=shift;
+  my $k=shift;
+  my @d=localtime($date);
+  my %o;
+  foreach my $f (qw(a A b B c C d D e E F G g h H I j k l m M p P r R s S T u U V W w x X y Y z Z Ec EC Ex EX Ey EY od oe OH OI Om OM OS Ou OU OV Ow OW Oy)) {
+    my $out;
+    if ($f eq lc($f)) {
+      $out="l$f";
+    } else {
+      $out="u$f";
+    }
+    $o{"$k.$out"}=strftime('%'.$f,@d);
+  }
+  return %o;
+}
