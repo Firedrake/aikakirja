@@ -38,6 +38,7 @@ comments: path to comments that get used
 db: path to sqlite database
 format: default format for processing new posts
 frontpage_posts: number of posts to show on front page
+index-books: any value to enable book indexer
 org: path to your org-mode definition. Not needed if you don't use org-mode.
 postfile: URL format (with strftime expansion) for individual posts.
 source: path to text
@@ -115,10 +116,47 @@ Run publish without arguments to see what will be posted next, or with
 
 The templates are basically Steve's, only lightly modified.
 
+=Book index generator
+
+You will need to add several header fields to blog posts to use the
+book index generator. At a minimum:
+
+book-title: The Title of the Book
+book-author: Author Name
+book-date: year of publication
+
+Optionally, if title and author aren't directly sortable:
+
+book-title-sort: Title of the Book, The (if different)
+book-author-sort: Name, Author (if different)
+
+If the author wrote this book under a pseudonym but you want to file
+this book with their other work, use the main name as the author
+entry, and add:
+
+book-author-as: Pseudo Nym
+
+If the book has a variant title in some versions, use:
+
+book-vt: Variant Title
+
+If the book is part of a series, use:
+
+book-series-id: The name of the series
+book-series-index: The position in the series (uses perl <=> sort)
+
+If a book has multiple authors, separate them with slashes. And put
+the sorted names in the same order, thus:
+
+book-author: Harry Turtledove/Roland Green/Martin H. Greenberg
+book-author-sort: Turtledove, Harry/Green, Roland/Greenberg, Martin H.
+
+If a book is part of multiple series, or has multiple and pseudonymous
+authors, you're on your own for now.
+
 =Warning
 
 Note that this is not the full code. In my own installation I have a
-section in aikakirja to generate a list of all reviewed books, and in
-publish to post selected blog entries to selected newsgroups. If there
-is a demand for these I will set them as configuration entities and
-add them into the public code.
+section in publish to post selected blog entries to selected
+newsgroups. If there is a demand for these I will set them as
+configuration entities and add them into the public code.
