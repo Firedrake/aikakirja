@@ -515,6 +515,89 @@ my @alltags;
   $xrefout->finish;
 }
 
+if (exists $cfg->{'index-books'}) { # build book list page
+  my ($fid)=$dbh->selectrow_array("SELECT id FROM headerfields WHERE field_name='book-title'");
+  my $sth=$dbh->prepare('SELECT posts.id AS id,html_file FROM posts INNER JOIN headervalues ON posts.id=post_id WHERE field_id=?');
+  my $sthb=$dbh->prepare('SELECT field_name,field_text FROM headervalues INNER JOIN headerfields ON field_id=headerfields.id WHERE headervalues.post_id=?');
+  $sth->execute($fid);
+  my @books;
+  while (my $a=$sth->fetchrow_hashref) {
+    my %data=%{$a};
+    $sthb->execute($data{id});
+    while (my $a=$sthb->fetchrow_hashref) {
+      $data{$a->{field_name}}=$a->{field_text};
+    }
+    $data{top_int}=$cfg->{top_int};
+    my %a=($data{'book-author'} => ($data{'book-author-sort'} || $data{'book-author'}));
+    if ($data{'book-author'} =~ /\//) {
+      my @k=split /\//,$data{'book-author'};
+      my @v=split /\//,($data{'book-author-sort'} || $data{'book-author'});
+      %a=map {$k[$_] => $v[$_]} 0..$#k;
+    }
+    delete $data{'book-author'};
+    delete $data{'book-author-sort'};
+    foreach my $an (keys %a) {
+      my %d=%data;
+      my %with=%a;
+      delete $with{$an};
+      if (%with) {
+        my @w=keys %with;
+        if (scalar @w==1) {
+          $d{'book-author-with'}=$w[0];
+        } else {
+          my $w=' and '.pop @w;
+          $d{'book-author-with'}=join(', ',@w).$w;
+        }
+      }
+      $d{'book-author'}=$an;
+      if ($an ne $a{$an}) {
+        $d{'book-author-sort'}=$a{$an};
+      }
+      push @books,\%d;
+    }
+  }
+  $sth->finish;
+  $sthb->finish;
+  my %authors=map {($_->{'book-author-sort'} || $_->{'book-author'}) => $_->{'book-author'}} @books;
+  my @authors;
+  foreach my $ak (sort keys %authors) {
+    my @b=grep {$_->{'book-author'} eq $authors{$ak}} @books;
+    my @series;
+    push @series,{books => [sort {$a->{'book-date'} <=> $b->{'book-date'} ||
+                                    ($a->{'book-title-sort'} || $a->{'book-title'}) cmp
+                                      ($b->{'book-title-sort'} || $b->{'book-title'})}
+                              grep {!exists $_->{'book-series-id'}} @b]};
+    my %slist;
+    foreach my $sid (grep {exists $_->{'book-series-id'}} @b) {
+      push @{$slist{$sid->{'book-series-id'}}},$sid->{'book-date'};
+    }
+    foreach my $k (keys %slist) {
+      $slist{$k}=min(@{$slist{$k}});
+    }
+    my @ser=sort {$slist{$a} <=> $slist{$b} || $a cmp $b } keys %slist;
+    foreach my $series (@ser) {
+      push @series,{title => $series,
+                    books => [sort {$a->{'book-series-index'} <=> $b->{'book-series-index'}} grep {exists $_->{'book-series-id'} && $_->{'book-series-id'} eq $series} @b]};
+    }
+    push @authors,{author => $authors{$ak},series => \@series};
+  }
+  my $tmpl=HTML::Template->new(filename => 'books.tmpl',
+                               die_on_bad_params => 0);
+  $tmpl->param(authors => \@authors,
+               blogtitle => $cfg->{title},
+               pagetitle => 'All book reviews',
+               top_int => $cfg->{top_int});
+  if (@alltags) {
+    $tmpl->param(alltags => \@alltags);
+  }
+  if (@calendar) {
+    $tmpl->param(calendar => \@calendar);
+  }
+  open OUT,'>:encoding(UTF-8)',$cfg->{target}.'/books.html';
+  print OUT $tmpl->output;
+  close OUT;
+}
+
 { # build all-comments RSS feed
   my $sth=$dbh->prepare('SELECT name,body,comments.date AS date,title,html_file FROM comments INNER JOIN posts ON post_id=posts.id ORDER BY comments.date DESC LIMIT ?');
   $sth->execute($cfg->{rss_comments});
