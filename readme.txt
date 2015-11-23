@@ -33,12 +33,14 @@ aikakirja itself is a blog compiler, using markdown or org-mode to
 convert plain text to blog posts. It needs a configuration file, by
 default ./config.yaml; a sample is provided.
 
+amazon-template: Amazon associate URL with $ASIN$ replacing the ASIN
 comment_days: number of days after posting to allow comments
 comments: path to comments that get used
 db: path to sqlite database
 format: default format for processing new posts
 frontpage_posts: number of posts to show on front page
 index-books: any value to enable book indexer
+index-films: ditto for films
 org: path to your org-mode definition. Not needed if you don't use org-mode.
 postfile: URL format (with strftime expansion) for individual posts.
 source: path to text
@@ -116,6 +118,11 @@ Run publish without arguments to see what will be posted next, or with
 
 The templates are basically Steve's, only lightly modified.
 
+=Amazon links
+
+If there is an asin: header field and amazon-template is defined, an
+Amazon associate link will be appended to the post.
+
 =Book index generator
 
 You will need to add several header fields to blog posts to use the
@@ -153,6 +160,15 @@ book-author-sort: Turtledove, Harry/Green, Roland/Greenberg, Martin H.
 
 If a book is part of multiple series, or has multiple and pseudonymous
 authors, you're on your own for now.
+
+=Film index generator
+
+As for books, but just uses
+
+film-title
+film-title-sort
+film-date
+film-vt
 
 =Warning
 

@@ -447,6 +447,7 @@ my @alltags;
   my $tag=$dbh->prepare('SELECT tags.name FROM tags,post_tags WHERE tags.id=post_tags.tag_id and post_tags.post_id=? ORDER BY tags.name');
   my $xrefout=$dbh->prepare('SELECT html_file,title FROM post_xrefs INNER JOIN posts ON to_id=posts.id WHERE from_id=? ORDER BY posts.date');
   my $comment=$dbh->prepare('SELECT name,date,body FROM comments WHERE post_id=? ORDER BY date');
+  my $asin=$dbh->prepare("SELECT field_text FROM headervalues INNER JOIN headerfields ON field_id=headerfields.id WHERE field_name='asin' AND headervalues.post_id=?");
   $sth->execute($buildtime);
   while (my @a=$sth->fetchrow_array) {
     $tag->execute($a[0]);
@@ -481,6 +482,14 @@ my @alltags;
     if (@comments) {
       $tmpl->param(comments => \@comments);
     }
+    if (exists $cfg->{'amazon-template'}) {
+      my $azlink=$cfg->{'amazon-template'};
+      $asin->execute($a[0]);
+      if (my @x=$asin->fetchrow_array) {
+        $azlink =~ s/\$ASIN\$/$x[0]/g;
+        $tmpl->param(azlink => $azlink);
+      }
+    }
     open OUT,'>:encoding(UTF-8)',join('/',$cfg->{target},$a[2]);
     print OUT $tmpl->output;
     close OUT;
@@ -513,6 +522,7 @@ my @alltags;
   $sth->finish;
   $tag->finish;
   $xrefout->finish;
+  $asin->finish;
 }
 
 if (exists $cfg->{'index-books'}) { # build book list page
@@ -594,6 +604,51 @@ if (exists $cfg->{'index-books'}) { # build book list page
     $tmpl->param(calendar => \@calendar);
   }
   open OUT,'>:encoding(UTF-8)',$cfg->{target}.'/books.html';
+  print OUT $tmpl->output;
+  close OUT;
+}
+
+if (exists $cfg->{'index-films'}) { # build film list page
+  my ($fid)=$dbh->selectrow_array("SELECT id FROM headerfields WHERE field_name='film-title'");
+  my $sth=$dbh->prepare('SELECT posts.id AS id,html_file FROM posts INNER JOIN headervalues ON posts.id=post_id WHERE field_id=?');
+  my $sthb=$dbh->prepare('SELECT field_name,field_text FROM headervalues INNER JOIN headerfields ON field_id=headerfields.id WHERE headervalues.post_id=?');
+  $sth->execute($fid);
+  my @films;
+  while (my $a=$sth->fetchrow_hashref) {
+    my %data=%{$a};
+    $sthb->execute($data{id});
+    while (my $a=$sthb->fetchrow_hashref) {
+      $data{$a->{field_name}}=$a->{field_text};
+    }
+    $data{top_int}=$cfg->{top_int};
+    push @films,\%data;
+  }
+  $sth->finish;
+  $sthb->finish;
+  my %years=map {$_->{'film-date'} => 1} @films;
+  my @years;
+  foreach my $yk (sort keys %years) {
+    my @b=grep {$_->{'film-date'} eq $yk} @films;
+    my @films;
+    push @films,sort {$a->{'film-date'} <=> $b->{'film-date'} ||
+                        ($a->{'film-title-sort'} || $a->{'film-title'}) cmp
+                          ($b->{'film-title-sort'} || $b->{'film-title'})}
+      @b;
+    push @years,{year => $yk,films => \@films};
+  }
+  my $tmpl=HTML::Template->new(filename => 'films.tmpl',
+                               die_on_bad_params => 0);
+  $tmpl->param(years => \@years,
+               blogtitle => $cfg->{title},
+               pagetitle => 'All film reviews',
+               top_int => $cfg->{top_int});
+  if (@alltags) {
+    $tmpl->param(alltags => \@alltags);
+  }
+  if (@calendar) {
+    $tmpl->param(calendar => \@calendar);
+  }
+  open OUT,'>:encoding(UTF-8)',$cfg->{target}.'/films.html';
   print OUT $tmpl->output;
   close OUT;
 }

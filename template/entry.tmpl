@@ -9,6 +9,7 @@
 <a href="<tmpl_var name=next.link>">Next: <tmpl_var name=next.title escape=html></a>
 </tmpl_if>
 <div class="body"><tmpl_var name=bodytext></div>
+<tmpl_if name=azlink><p><a href="<tmpl_var name=azlink>"><b>Buy at Amazon</b></a> and help support the blog</p></tmpl_if>
 <tmpl_if name=tags><div class="tags">Tags: <tmpl_loop name=tags>
 <a href="/tags/<tmpl_var name=tag_encode>"><tmpl_var name=tag escape=html></a>
 </tmpl_loop></div></tmpl_if>
@@ -23,7 +24,7 @@
 <tmpl_var name=date.ui>:<tmpl_var name=date.um><tmpl_var name=date.up> on
 <tmpl_var name=date.ld> <tmpl_var name=date.ub> <tmpl_var name=date.uy></a>
 <br>
-<tmpl_var name=body>
+<tmpl_var name=body></li>
 </tmpl_loop></ol></tmpl_if>
 <tmpl_if name=submit_comment>
 <h3>Add A Comment</h3>
