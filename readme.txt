@@ -8,7 +8,7 @@ unexpected bugs.
 
 =Copyright
 
-Yokosou is Copyright 2015 Roger Bell_West.
+Aikakirja is Copyright 2015 Roger Bell_West.
 
 This program is free software; you can redistribute it and/or modify it
 under the terms of the GNU General Public License as published by the
