@@ -85,7 +85,6 @@ comments/fail.yaml as:
 etc. and known good correspondents/IP addresses into
 comments/pass.yaml as:
 
-
 ---
 Mail:
   - good@address
@@ -122,6 +121,14 @@ The templates are basically Steve's, only lightly modified.
 
 If there is an asin: header field and amazon-template is defined, an
 Amazon associate link will be appended to the post.
+
+For multiple links, use
+
+asin: ASIN1/ASIN2
+
+For named links (especially useful with the above):
+
+asin: ASIN1 product name 1/ASIN2 product name 2
 
 =Book index generator
 

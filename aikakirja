@@ -28,26 +28,26 @@ my $trans=0;
   if (defined $DBI::err && $DBI::err==1) {
     $dbh->do('CREATE TABLE posts
                 (id INTEGER PRIMARY KEY ASC,
-                 date STRING,
-                 title STRING,
-                 format STRING,
-                 html_short STRING,
+                 date TEXT,
+                 title TEXT,
+                 format TEXT,
+                 html_short TEXT,
                  comments INTEGER,
-                 text_file STRING,
-                 html_file STRING,
+                 text_file TEXT,
+                 html_file TEXT,
                  last_built INTEGER)');
     # some sort of autopage dependency thing
     $dbh->do('CREATE TABLE comments
                 (id INTEGER PRIMARY KEY ASC,
                  post_id INTEGER,
-                 name STRING,
-                 file STRING,
+                 name TEXT,
+                 file TEXT,
                  date INTEGER,
                  last_built INTEGER,
-                 body STRING)');
+                 body TEXT)');
     $dbh->do('CREATE TABLE tags
                 (id INTEGER PRIMARY KEY ASC,
-                 name STRING UNIQUE)');
+                 name TEXT UNIQUE)');
     $dbh->do('CREATE TABLE post_tags
                 (post_id INTEGER,
                  tag_id INTEGER)');
@@ -56,14 +56,14 @@ my $trans=0;
                  to_id INTEGER)');
     $dbh->do('CREATE TABLE pending_xrefs
                 (from_id INTEGER,
-                 to_file STRING)');
+                 to_file TEXT)');
     $dbh->do('CREATE TABLE headerfields
                 (id INTEGER PRIMARY KEY ASC,
-                 field_name STRING UNIQUE)');
+                 field_name TEXT UNIQUE)');
     $dbh->do('CREATE TABLE headervalues
                 (post_id INTEGER,
                  field_id INTEGER,
-                 field_text STRING)');
+                 field_text TEXT)');
     $trans=1;
   }
 }
@@ -483,12 +483,23 @@ my @alltags;
       $tmpl->param(comments => \@comments);
     }
     if (exists $cfg->{'amazon-template'}) {
-      my $azlink=$cfg->{'amazon-template'};
+      my @al;
       $asin->execute($a[0]);
       if (my @x=$asin->fetchrow_array) {
-        $azlink =~ s/\$ASIN\$/$x[0]/g;
-        $tmpl->param(azlink => $azlink);
+        if ($x[0] =~ /\//) {
+          @x=split /\//,$x[0];
+        }
+        foreach my $asf (@x) {
+          my $text='';
+          if ($asf =~ /^(\S+)\s+(.+)$/) {
+            $text=$2;
+            $asf=$1;
+          }
+          (my $azlink=$cfg->{'amazon-template'}) =~ s/\$ASIN\$/$asf/g;
+          push @al,{link => $azlink,text => $text};
+        }
       }
+      $tmpl->param(azlink => \@al);
     }
     open OUT,'>:encoding(UTF-8)',join('/',$cfg->{target},$a[2]);
     print OUT $tmpl->output;
