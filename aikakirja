@@ -368,21 +368,28 @@ my @alltags;
       $a->{comments}=$aa->[0];
       $a->{cplural}=($aa->[0]!=1);
     }
+    $tag->execute($a->{id});
+    my @taglist;
+    while (my @t=$tag->fetchrow_array) {
+      push @taglist,$t[0];
+      push @{$a->{tags}},{tag => $t[0]};
+    }
     push @{$pages{'index.html'}{posts}},$a;
     my $ym=strftime($cfg->{postfile},localtime($a->{date}));
     $ym =~ s/POST/index.html/;
     push @{$pages{$ym}{posts}},$a;
     $pages{$ym}{title}=strftime('%B %Y',localtime($a->{date}));
     $tag->execute($a->{id});
-    while (my @t=$tag->fetchrow_array) {
-      my $t=$cfg->{tagdir}.$t[0].'/index.html';
+    foreach my $tag (@taglist) {
+      my $t=$cfg->{tagdir}.$tag.'/index.html';
       push @{$pages{$t}{posts}},$a;
-      $pages{$t}{title}=$t[0];
+      $pages{$t}{title}=$tag;
     }
   }
   $sth->finish;
   $tag->finish;
   $comm->finish;
+  my $rpp=[@{$pages{'index.html'}{posts}}];
   if (scalar @{$pages{'index.html'}{posts}} > $cfg->{frontpage_posts}) {
     splice @{$pages{'index.html'}{posts}},$cfg->{frontpage_posts};
   }
@@ -426,6 +433,9 @@ my @alltags;
       open OUT,'>:encoding(UTF-8)',join('/',$cfg->{target},$pagefile);
       print OUT $tmpl->output;
       close OUT;
+      if ($pagefile eq 'index.html') {
+        $pages{$pagefile}{posts}=$rpp;
+      }
       if (scalar @{$pages{$pagefile}{posts}} > $cfg->{rss_posts}) {
         splice @{$pages{$pagefile}{posts}},$cfg->{rss_posts};
       }
