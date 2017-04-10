@@ -3,6 +3,7 @@
 use strict;
 use warnings;
 
+use Clone qw(clone);
 use DBI;
 use Date::Parse;
 use File::Temp qw(tempfile);
@@ -600,15 +601,31 @@ if (exists $cfg->{'index-books'}) { # build book list page
                               grep {!exists $_->{'book-series-id'}} @b]};
     my %slist;
     foreach my $sid (grep {exists $_->{'book-series-id'}} @b) {
-      push @{$slist{$sid->{'book-series-id'}}},$sid->{'book-date'};
+      foreach my $ssid (split '/',$sid->{'book-series-id'}) {
+        push @{$slist{$ssid}},$sid->{'book-date'};
+      }
     }
     foreach my $k (keys %slist) {
       $slist{$k}=min(@{$slist{$k}});
     }
     my @ser=sort {$slist{$a} <=> $slist{$b} || $a cmp $b } keys %slist;
     foreach my $series (@ser) {
+      my @bb;
+      foreach my $book (@b) {
+        if (exists $book->{'book-series-id'}) {
+          my @si=split '/',$book->{'book-series-id'};
+          my @sx=split '/',$book->{'book-series-index'};
+          my %s=map {$si[$_] => $sx[$_]} (0..$#si);
+          if (exists $s{$series}) {
+            my $b=clone($book);
+            $b->{'book-series-id'}=$series;
+            $b->{'book-series-index'}=$s{$series};
+            push @bb,$b;
+          }
+        }
+      }
       push @series,{title => $series,
-                    books => [sort {$a->{'book-series-index'} <=> $b->{'book-series-index'}} grep {exists $_->{'book-series-id'} && $_->{'book-series-id'} eq $series} @b]};
+                    books => [sort {$a->{'book-series-index'} <=> $b->{'book-series-index'}} @bb]};
     }
     push @authors,{author => $authors{$ak},series => \@series};
   }

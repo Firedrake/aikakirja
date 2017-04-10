@@ -154,19 +154,34 @@ If the book has a variant title in some versions, use:
 
 book-vt: Variant Title
 
-If the book is part of a series, use:
-
-book-series-id: The name of the series
-book-series-index: The position in the series (uses perl <=> sort)
-
 If a book has multiple authors, separate them with slashes. And put
 the sorted names in the same order, thus:
 
 book-author: Harry Turtledove/Roland Green/Martin H. Greenberg
 book-author-sort: Turtledove, Harry/Green, Roland/Greenberg, Martin H.
 
-If a book is part of multiple series, or has multiple and pseudonymous
-authors, you're on your own for now.
+A book with multiple authors using a single pseudonym will work:
+
+book-author: Daniel Abraham/Ty Franck
+book-author-sort: Abraham, Daniel/Franck, Ty
+book-author-as: James S. A. Corey
+
+If the book is part of a series, use:
+
+book-series-id: The name of the series
+book-series-index: The position in the series (uses perl <=> sort)
+
+If a book is part of multiple series, separate both fields with
+slashes as for authors. This attempts to do the right thing where
+there are also multiple authors involved, but a series with no single
+author won't be listed in full anywhere.
+
+book-title: Double
+book-series-id: Sharon McCone/Nameless Detective
+book-series-index: 6/14
+
+If a book has multiple authors using different pseudonyms, you're on
+your own for now.
 
 =Film index generator
 
