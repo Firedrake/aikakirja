@@ -2,10 +2,18 @@
           "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd">
 <html xmlns="http://www.w3.org/1999/xhtml" dir="ltr">
 <head><title><tmpl_var name=blogtitle escape=html>: <tmpl_var name=pagetitle escape=html></title>
+<link rel="search" type="application/opensearchdescription+xml" href="https://blog.firedrake.org/opensearch.xml" title="Search <tmpl_var name=blogtitle escape=html>" />
 <meta http-equiv="Content-Type" content="text/html;charset=utf-8" />
 <tmpl_loop name=links>
 <link rel="<tmpl_var name=rel>" title="<tmpl_var name=title>" href="<tmpl_var name=top_ext><tmpl_var name=href>" type="<tmpl_var name=type>" />
 </tmpl_loop>
+<tmpl_if name=og>
+<meta property="og:title" content="<tmpl_var name=pagetitle escape=html>">
+<meta property="og:site_name" content="<tmpl_var name=blogtitle escape=html>">
+<meta property="og:type" content="article">
+<meta property="og:url" content="<tmpl_var name=top_ext><tmpl_var name=pagefile>">
+<meta property="og:description" content="<tmpl_var name=shorttext escape=html>">
+</tmpl_if>
 <style>
 body {
 	padding-bottom: 1em;

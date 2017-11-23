@@ -454,7 +454,7 @@ my @alltags;
 }
 
 { # build full HTML posts (and RSS)
-  my $sth=$dbh->prepare('SELECT id,text_file,html_file,format,title,date,comments FROM posts WHERE last_built=?');
+  my $sth=$dbh->prepare('SELECT id,text_file,html_file,format,title,date,comments,html_short FROM posts WHERE last_built=?');
   my $tag=$dbh->prepare('SELECT tags.name FROM tags,post_tags WHERE tags.id=post_tags.tag_id and post_tags.post_id=? ORDER BY tags.name');
   my $xrefout=$dbh->prepare('SELECT html_file,title FROM post_xrefs INNER JOIN posts ON to_id=posts.id WHERE from_id=? ORDER BY posts.date');
   my $comment=$dbh->prepare('SELECT name,date,body FROM comments WHERE post_id=? ORDER BY date');
@@ -472,12 +472,17 @@ my @alltags;
     my $tmpl=HTML::Template->new(filename => 'entry.tmpl',
                                  die_on_bad_params => 0);
     $tmpl->param(pagetitle => $a[4],
+                 pagefile => $a[2],
                  blogtitle => $cfg->{title},
                  dateformat($a[5],'date'),
                  top_int => $cfg->{top_int},
+                 top_ext => $cfg->{top_ext},
                  link => $a[2],
                  submit_comment => $a[6],
-                 bodytext => mk_html($a[1],'long',$a[3]),);
+                 bodytext => mk_html($a[1],'long',$a[3]),
+                 shorttext => $a[7],
+                 og => 1,
+                   );
     if (@alltags) {
       $tmpl->param(alltags => \@alltags);
     }
