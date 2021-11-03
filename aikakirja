@@ -453,7 +453,46 @@ my @alltags;
   }
 }
 
-{ # build full HTML posts (and RSS)
+{                               # build full HTML posts (and RSS)
+  my %postinseries;
+  { # build prev/next links for posts in series
+    my %ixlist;
+    my $sth=$dbh->prepare("SELECT headervalues.post_id,field_text FROM headervalues INNER JOIN headerfields ON field_id=headerfields.id WHERE field_name='book-series-id'");
+    my $sthix=$dbh->prepare("SELECT field_text FROM headervalues INNER JOIN headerfields ON field_id=headerfields.id WHERE field_name='book-series-index' AND headervalues.post_id=?");
+    my $sthpf=$dbh->prepare("SELECT html_file,headervalues.field_text FROM posts INNER JOIN headervalues ON headervalues.post_id=posts.id INNER JOIN headerfields ON field_id=headerfields.id WHERE posts.id=? AND field_name='book-title'");
+    $sth->execute;
+    while (my @a=$sth->fetchrow_array) {
+      $sthix->execute($a[0]);
+      my @b=$sthix->fetchrow_array;
+      my @si=split '/',$a[1];
+      my @sx=split '/',$b[0];
+      foreach my $sq (0..$#si) {
+        $ixlist{$si[$sq]}{$sx[$sq]}=$a[0];
+      }
+    }
+    foreach my $series (sort keys %ixlist) {
+      my @seq=sort {$a <=> $b} keys %{$ixlist{$series}};
+      foreach my $n (0..$#seq) {
+        my %r;
+        if ($n>0) { # previous link
+          $r{seriesprev}=$ixlist{$series}{$seq[$n-1]};
+        }
+        if ($n<$#seq) { # next link
+          $r{seriesnext}=$ixlist{$series}{$seq[$n+1]};
+        }
+        if (keys %r) {
+          foreach my $x (keys %r) {
+            $sthpf->execute($r{$x});
+            my @a=$sthpf->fetchrow_array;
+            $r{$x}="$a[1]";
+            $r{"$x.link"}=$cfg->{top_ext}.$a[0];
+          }
+          $r{seriestitle}=$series;
+          push @{$postinseries{$ixlist{$series}{$seq[$n]}}},\%r;
+        }
+      }
+    }
+  }
   my $sth=$dbh->prepare('SELECT id,text_file,html_file,format,title,date,comments,html_short FROM posts WHERE last_built=?');
   my $tag=$dbh->prepare('SELECT tags.name FROM tags,post_tags WHERE tags.id=post_tags.tag_id and post_tags.post_id=? ORDER BY tags.name');
   my $xrefout=$dbh->prepare('SELECT html_file,title FROM post_xrefs INNER JOIN posts ON to_id=posts.id WHERE from_id=? ORDER BY posts.date');
@@ -483,6 +522,9 @@ my @alltags;
                  shorttext => $a[7],
                  og => 1,
                    );
+    if (exists $postinseries{$a[0]}) {
+      $tmpl->param(series => $postinseries{$a[0]});
+    }
     if (@alltags) {
       $tmpl->param(alltags => \@alltags);
     }
@@ -565,7 +607,8 @@ if (exists $cfg->{'index-books'}) { # build book list page
       $data{$a->{field_name}}=$a->{field_text};
     }
     $data{top_int}=$cfg->{top_int};
-    my %a=($data{'book-author'} => ($data{'book-author-sort'} || $data{'book-author'}));
+    $data{'book-author'} ||= '';
+    my %a=(($data{'book-author'} || '') => ($data{'book-author-sort'} || $data{'book-author'}));
     if ($data{'book-author'} =~ /\//) {
       my @k=split /\//,$data{'book-author'};
       my @v=split /\//,($data{'book-author-sort'} || $data{'book-author'});
@@ -607,7 +650,7 @@ if (exists $cfg->{'index-books'}) { # build book list page
     my %slist;
     foreach my $sid (grep {exists $_->{'book-series-id'}} @b) {
       foreach my $ssid (split '/',$sid->{'book-series-id'}) {
-        push @{$slist{$ssid}},$sid->{'book-date'};
+        push @{$slist{$ssid}},$sid->{'book-date'} || 0;
       }
     }
     foreach my $k (keys %slist) {
@@ -664,7 +707,26 @@ if (exists $cfg->{'index-films'}) { # build film list page
       $data{$a->{field_name}}=$a->{field_text};
     }
     $data{top_int}=$cfg->{top_int};
-    push @films,\%data;
+    if ($data{'film-title'} =~ /\//) {
+      foreach my $f (grep !/(html_file|top_int)/,keys %data) {
+        if ($data{$f} =~ /\//) {
+          $data{$f}=[split /\//,$data{$f}];
+        }
+      }
+      foreach my $i (0..$#{$data{'film-title'}}) {
+        my %d;
+        foreach my $f (keys %data) {
+          if (ref $data{$f}) {
+            $d{$f}=$data{$f}[$i] || $data{$f}[0];
+          } else {
+            $d{$f}=$data{$f};
+          }
+        }
+        push @films,\%d;
+      }
+    } else {
+      push @films,\%data;
+    }
   }
   $sth->finish;
   $sthb->finish;
@@ -727,9 +789,9 @@ if ($trans) {
 
 $dbh->disconnect;
 
-sub mk_html { # content is a filename or actual content;
-              # mode is "short" or "long";
-              # format is "markdown", "org-mode", "html", etc.
+sub mk_html {         # content is a filename or actual content;
+                      # mode is "short" or "long";
+                      # format is "markdown", "org-mode", "html", etc.
   my ($content,$mode,$format)=@_;
   if ($content !~ /\n/s) {
     open I,'<:encoding(UTF-8)',$cfg->{source}.'/'.$content;
@@ -749,10 +811,21 @@ sub mk_html { # content is a filename or actual content;
   close $fh;
   my $out='';
   if ($format eq 'markdown') {
-    open H,'-|','markdown',$fn;
+    open I,'<:encoding(UTF-8)',$fn;
+    my $s=join('',<I>);
+    close I;
+    my $fnh='';
+    if ($s =~ /\|-+\|/) {       # we have a table
+      system('bluefeather',$fn);
+      ($fnh=$fn) =~ s/(\.txt)?$/.html/;
+      open H,'<',$fnh;
+    } else {
+      open H,'-|','markdown',$fn;
+    }
     binmode(H,':encoding(UTF-8)');
     $out=join('',<H>);
     close H;
+    unlink $fnh if $fnh;
   } elsif ($format eq 'org-mode') {
     system('ln',$fn,"$fn,org");
     system(qw(emacs --batch),'--load='.$cfg->{org},"--visit=$fn",qw(--funcall org-export-as-html-batch));
