@@ -1,9 +1,0 @@
-<tmpl_include name=top.inc.tmpl>
-<tmpl_loop name=posts>
-<fieldset>
-<legend><a href="<tmpl_var name=top_int><tmpl_var name=html_file>"><tmpl_var name=title escape=html></a></legend>
-<tmpl_var name=date.ld> <tmpl_var name=date.ub> <tmpl_var name=date.uy><tmpl_if name=comments> - <tmpl_var name=comments> comment<tmpl_if name=cplural>s</tmpl_if></tmpl_if><br>
-<tmpl_var name=html_short><a href="<tmpl_var name=top_int><tmpl_var name=html_file>">[more]</a>
-</fieldset>
-</tmpl_loop>
-<tmpl_include name=bottom.inc.tmpl>
